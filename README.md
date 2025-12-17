@@ -1,67 +1,89 @@
 ```bash
-# Kubelet needs broad permissions
-$ kubectl auth can-i list pods --as=system:node:node-1
-yes
+$ kubectl apply -f high-iops-storage-v133.yaml
+persistentvolumeclaim/high-iops-storage created
 
-# Kubelet can list ALL pods in cluster (security risk)
-$ kubectl get pods --as=system:node:node-1 -A
-NAMESPACE     NAME                          READY   STATUS    RESTARTS   AGE
-kube-system   coredns-558bd4d5db-xyz        1/1     Running   0          1d
-kube-system   etcd-master                   1/1     Running   0          1d
-default       app-pod-1                     1/1     Running   0          1h
-default       app-pod-2                     1/1     Running   0          1h
-sensitive     secret-workload               1/1     Running   0          30m   # Kubelet can see this!
+$ kubectl get pvc
+NAME               STATUS   VOLUME                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+high-iops-storage  Bound    pvc-abc123-def456-ghi789   100Gi      RWO            gp3            30s
 
-# No way to restrict based on node assignment
-$ kubectl get pods --field-selector=spec.nodeName=node-2 --as=system:node:node-1
-NAME        READY   STATUS    RESTARTS   AGE
-other-pod   1/1     Running   0          1h    # Can see pods on other nodes!
+# Check current IOPS (AWS EBS example)
+$ aws ec2 describe-volumes --volume-ids vol-abc123def456ghi789
+{
+    "Volumes": [{
+        "VolumeId": "vol-abc123def456ghi789",
+        "Iops": 3000,           # Default gp3 IOPS
+        "Throughput": 125       # Default throughput
+    }]
+}
 
-# Audit log shows excessive access
-$ grep "system:node:node-1" /var/log/audit/audit.log | grep pods
-{"verb":"list","objectRef":{"resource":"pods","namespace":"default"}}
-{"verb":"list","objectRef":{"resource":"pods","namespace":"kube-system"}}
-{"verb":"list","objectRef":{"resource":"pods","namespace":"sensitive"}}   # Unnecessary access
+# Need to increase IOPS for performance - REQUIRES RECREATION
+$ kubectl delete pvc high-iops-storage
+persistentvolumeclaim "high-iops-storage" deleted
+# Data is lost! Must backup/restore
+
+$ kubectl apply -f high-iops-storage-modified.yaml
+persistentvolumeclaim/high-iops-storage created
+
+# Pod must be recreated to use new volume
+$ kubectl delete pod app-pod
+$ kubectl apply -f app-pod.yaml
+# Downtime during recreation
 ```
 
 ```bash
-# Fine-grained authorization with field selectors
-$ kubectl auth can-i list pods --as=system:node:node-1
-yes
+$ kubectl apply -f dynamic-storage-v134.yaml
+volumeattributesclass.storage.k8s.io/high-performance created
+persistentvolumeclaim/dynamic-storage-v134 created
 
-# Kubelet can only list pods assigned to its node
-$ kubectl get pods --as=system:node:node-1 -A
-Error from server (Forbidden): pods is forbidden: User "system:node:node-1" 
-cannot list resource "pods" in API group "" at the cluster scope
+$ kubectl get pvc
+NAME                   STATUS   VOLUME                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+dynamic-storage-v134   Bound    pvc-xyz789-abc123-def456   100Gi      RWO            gp3            30s
 
-# Must use field selector for node-specific access
-$ kubectl get pods --field-selector=spec.nodeName=node-1 --as=system:node:node-1
-NAME              READY   STATUS    RESTARTS   AGE
-node-1-pod-1      1/1     Running   0          1h
-node-1-pod-2      1/1     Running   0          30m
+$ kubectl get volumeattributesclass
+NAME               AGE
+high-performance   30s
 
-# Cannot access pods on other nodes
-$ kubectl get pods --field-selector=spec.nodeName=node-2 --as=system:node:node-1
-Error from server (Forbidden): pods is forbidden: field selector "spec.nodeName=node-2" 
-not allowed for user "system:node:node-1"
+# Check initial volume attributes
+$ aws ec2 describe-volumes --volume-ids vol-xyz789abc123def456
+{
+    "Volumes": [{
+        "VolumeId": "vol-xyz789abc123def456", 
+        "Iops": 10000,          # From VolumeAttributesClass
+        "Throughput": 500       # From VolumeAttributesClass
+    }]
+}
 
-# Authorization policy enforces node isolation
-$ kubectl describe clusterrole system:node
-Rules:
-  Resources  Non-Resource URLs  Resource Names  Verbs
-  pods       []                 []              [get list]
-  # But authorization middleware checks field selectors:
-  # - spec.nodeName must match requesting node
-  # - Cannot list pods without node-specific selector
+# Need more performance? Update VolumeAttributesClass dynamically
+$ kubectl patch volumeattributesclass high-performance --type='merge' -p='{"parameters":{"iops":"20000","throughput":"1000"}}'
+volumeattributesclass.storage.k8s.io/high-performance patched
 
-# Audit log shows restricted access
-$ grep "system:node:node-1" /var/log/audit/audit.log | grep pods
-{"verb":"list","objectRef":{"resource":"pods"},"requestObject":{"fieldSelector":"spec.nodeName=node-1"}}
-# Only shows access to own node's pods
+# Apply new attributes to existing PVC (NO RECREATION NEEDED)
+$ kubectl patch pvc dynamic-storage-v134 --type='merge' -p='{"spec":{"volumeAttributesClassName":"high-performance"}}'
+persistentvolumeclaim/dynamic-storage-v134 patched
 
-# Multi-tenant security improvement
-$ kubectl get pods --as=system:node:node-1 --field-selector=metadata.namespace=tenant-a
-Error from server (Forbidden): field selector combination not allowed
-# Prevents cross-tenant pod visibility
+# Check volume modification in progress
+$ kubectl describe pvc dynamic-storage-v134
+Events:
+  Normal  VolumeAttributesModification  30s  volume-modifier  Modifying volume attributes
+  Normal  VolumeAttributesModified      15s  volume-modifier  Volume attributes successfully modified
+
+# Verify new IOPS without downtime
+$ aws ec2 describe-volumes --volume-ids vol-xyz789abc123def456
+{
+    "Volumes": [{
+        "VolumeId": "vol-xyz789abc123def456",
+        "Iops": 20000,          # Updated dynamically!
+        "Throughput": 1000,     # Updated dynamically!
+        "ModifyingProgress": 100 # Modification complete
+    }]
+}
+
+# Pod continues running with improved performance
+$ kubectl get pods
+NAME      READY   STATUS    RESTARTS   AGE
+app-pod   1/1     Running   0          5m    # No restart needed!
+
+# Performance improvement visible immediately
+$ kubectl exec app-pod -- fio --name=test --rw=randwrite --bs=4k --numjobs=1 --time_based --runtime=30s
+write: IOPS=18.5k    # Higher IOPS achieved without downtime
 ```
-
