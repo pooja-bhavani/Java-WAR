@@ -1,58 +1,67 @@
 ```bash
-$ kubectl apply -f config-v133.yaml
-configmap/config created
+# Kubelet needs broad permissions
+$ kubectl auth can-i list pods --as=system:node:node-1
+yes
 
-$ kubectl get configmap config -o yaml
-apiVersion: v1
-data:
-  country: "false"        # NO became boolean false!
-  enabled: "true"         # yes became boolean true!
-  port: "8080"           # 8080something truncated
-  version: "1.23"        # 01.23 became 1.23 (lost leading zero)
-kind: ConfigMap
+# Kubelet can list ALL pods in cluster (security risk)
+$ kubectl get pods --as=system:node:node-1 -A
+NAMESPACE     NAME                          READY   STATUS    RESTARTS   AGE
+kube-system   coredns-558bd4d5db-xyz        1/1     Running   0          1d
+kube-system   etcd-master                   1/1     Running   0          1d
+default       app-pod-1                     1/1     Running   0          1h
+default       app-pod-2                     1/1     Running   0          1h
+sensitive     secret-workload               1/1     Running   0          30m   # Kubelet can see this!
 
-# Application reads wrong values
-$ kubectl exec test-pod -- env | grep CONFIG
-CONFIG_COUNTRY=false     # Should be "NO" (Norway)
-CONFIG_ENABLED=true      # Should be "yes" 
-CONFIG_VERSION=1.23      # Should be "01.23"
+# No way to restrict based on node assignment
+$ kubectl get pods --field-selector=spec.nodeName=node-2 --as=system:node:node-1
+NAME        READY   STATUS    RESTARTS   AGE
+other-pod   1/1     Running   0          1h    # Can see pods on other nodes!
 
-# Debugging nightmare - values silently changed
-$ echo "Application fails because country=false instead of 'NO'"
-$ echo "Version comparison breaks: '1.23' != '01.23'"
+# Audit log shows excessive access
+$ grep "system:node:node-1" /var/log/audit/audit.log | grep pods
+{"verb":"list","objectRef":{"resource":"pods","namespace":"default"}}
+{"verb":"list","objectRef":{"resource":"pods","namespace":"kube-system"}}
+{"verb":"list","objectRef":{"resource":"pods","namespace":"sensitive"}}   # Unnecessary access
 ```
 
 ```bash
-$ KUBECTL_KYAML=true kubectl apply -f config-v134.yaml
-configmap/config created
+# Fine-grained authorization with field selectors
+$ kubectl auth can-i list pods --as=system:node:node-1
+yes
 
-$ kubectl get configmap config -o yaml
-apiVersion: v1
-data:
-  country: "NO"          # Preserved as string
-  enabled: "yes"         # Preserved as string  
-  port: "8080"          # Preserved as string
-  version: "01.23"      # Leading zero preserved
-kind: ConfigMap
+# Kubelet can only list pods assigned to its node
+$ kubectl get pods --as=system:node:node-1 -A
+Error from server (Forbidden): pods is forbidden: User "system:node:node-1" 
+cannot list resource "pods" in API group "" at the cluster scope
 
-# Application reads correct values
-$ kubectl exec test-pod -- env | grep CONFIG
-CONFIG_COUNTRY=NO        # Correct country code
-CONFIG_ENABLED=yes       # Correct string value
-CONFIG_VERSION=01.23     # Leading zero preserved
+# Must use field selector for node-specific access
+$ kubectl get pods --field-selector=spec.nodeName=node-1 --as=system:node:node-1
+NAME              READY   STATUS    RESTARTS   AGE
+node-1-pod-1      1/1     Running   0          1h
+node-1-pod-2      1/1     Running   0          30m
 
-# KYAML validation catches problems early
-$ cat problematic.yaml
-apiVersion: v1
-kind: ConfigMap
-data:
-  country: NO            # Unquoted - KYAML will warn
-  
-$ KUBECTL_KYAML=true kubectl apply -f problematic.yaml --dry-run=client
-Warning: KYAML: Boolean-like strings should be quoted
-Warning: KYAML: Value 'NO' may be interpreted as boolean, consider quoting
+# Cannot access pods on other nodes
+$ kubectl get pods --field-selector=spec.nodeName=node-2 --as=system:node:node-1
+Error from server (Forbidden): pods is forbidden: field selector "spec.nodeName=node-2" 
+not allowed for user "system:node:node-1"
 
-# Safe application behavior
-$ echo "Application works correctly with preserved string values"
-$ echo "No silent type coercion surprises"
+# Authorization policy enforces node isolation
+$ kubectl describe clusterrole system:node
+Rules:
+  Resources  Non-Resource URLs  Resource Names  Verbs
+  pods       []                 []              [get list]
+  # But authorization middleware checks field selectors:
+  # - spec.nodeName must match requesting node
+  # - Cannot list pods without node-specific selector
+
+# Audit log shows restricted access
+$ grep "system:node:node-1" /var/log/audit/audit.log | grep pods
+{"verb":"list","objectRef":{"resource":"pods"},"requestObject":{"fieldSelector":"spec.nodeName=node-1"}}
+# Only shows access to own node's pods
+
+# Multi-tenant security improvement
+$ kubectl get pods --as=system:node:node-1 --field-selector=metadata.namespace=tenant-a
+Error from server (Forbidden): field selector combination not allowed
+# Prevents cross-tenant pod visibility
 ```
+
