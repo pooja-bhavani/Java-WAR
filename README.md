@@ -1,82 +1,72 @@
-# Java-WAR
-
 ```bash
-# Attempting to start kubelet with swap enabled
-$ sudo systemctl start kubelet
-$ sudo systemctl status kubelet
-● kubelet.service - kubelet: The Kubernetes Node Agent
-   Active: failed (Result: exit-code)
+$ kubectl apply -f ml-training-job-v133.yaml
+job.batch/ml-training-job created
 
-$ sudo journalctl -u kubelet
-Jan 15 10:00:00 node-1 kubelet[1234]: F0115 10:00:00.123456    1234 server.go:294] 
-failed to run Kubelet: running with swap on is not supported, please disable swap! 
-or set --fail-swap-on flag to false.
+# Simulate pod failure
+$ kubectl delete pod ml-training-job-xyz --force
+pod "ml-training-job-xyz" force deleted
 
-# Must disable swap entirely
-$ sudo swapoff -a
-$ sudo systemctl start kubelet
-$ sudo systemctl status kubelet
-● kubelet.service - kubelet: The Kubernetes Node Agent
-   Active: active (running)
+$ kubectl get pods -w
+NAME                    READY   STATUS        RESTARTS   AGE
+ml-training-job-xyz     1/1     Terminating   0          2m
+ml-training-job-abc     0/1     Pending       0          5s    # New pod created immediately!
 
-# Pod with memory pressure gets OOMKilled
-$ kubectl apply -f memory-intensive-pod.yaml
+# Both pods exist simultaneously - resource conflict
+$ kubectl describe pod ml-training-job-abc
+Events:
+  Warning  FailedScheduling  30s  default-scheduler  0/3 nodes are available: 
+  1 Insufficient nvidia.com/gpu (old pod still holds GPU while terminating)
+
+# Resource waste and autoscaler confusion
+$ kubectl get nodes
+NAME     STATUS   ROLES    AGE   VERSION
+node-1   Ready    <none>   1d    v1.33.0
+node-2   Ready    <none>   1d    v1.33.0   # Autoscaler may add unnecessary nodes
+
+# Old pod finally terminates, new pod can start
 $ kubectl get pods
-NAME                   READY   STATUS      RESTARTS   AGE
-memory-intensive-pod   0/1     OOMKilled   1          30s
-
-$ kubectl describe pod memory-intensive-pod
-Last State:     Terminated
-  Reason:       OOMKilled    # No swap available for memory bursts
-  Exit Code:    137
+NAME                    READY   STATUS    RESTARTS   AGE
+ml-training-job-abc     1/1     Running   0          2m
 ```
 
-
 ```bash
-# Kubelet starts successfully with swap enabled
-$ sudo swapon /swapfile
-$ sudo systemctl start kubelet
-$ sudo systemctl status kubelet
-● kubelet.service - kubelet: The Kubernetes Node Agent
-   Active: active (running)
+$ kubectl apply -f ml-training-job-v134.yaml
+job.batch/ml-training-job-v134 created
 
-$ sudo journalctl -u kubelet | grep swap
-Jan 15 10:00:00 node-1 kubelet[5678]: I0115 10:00:00.123456    5678 kubelet.go:123] 
-"Swap is enabled with LimitedSwap behavior"
+# Simulate pod failure
+$ kubectl delete pod ml-training-job-v134-xyz --force
+pod "ml-training-job-v134-xyz" force deleted
 
-# Check swap configuration
-$ kubectl get --raw /api/v1/nodes/node-1 | jq '.status.allocatable'
-{
-  "cpu": "4",
-  "memory": "8Gi",
-  "swap.alpha.kubernetes.io/memory": "2Gi"    # Swap available!
-}
+$ kubectl get pods -w
+NAME                        READY   STATUS        RESTARTS   AGE
+ml-training-job-v134-xyz    1/1     Terminating   0          2m
+# No new pod created yet - waiting for clean termination
 
-# Pod can use swap for memory bursts
-$ kubectl apply -f burstable-workload-v134.yaml
+$ kubectl describe job ml-training-job-v134
+Spec:
+  Pod Replacement Policy: Failed    # Wait for Failed status
+
+# Pod reaches Failed status, resources fully released
 $ kubectl get pods
-NAME                READY   STATUS    RESTARTS   AGE
-burstable-workload  1/1     Running   0          2m
+NAME                        READY   STATUS   RESTARTS   AGE
+ml-training-job-v134-xyz    0/1     Failed   0          3m
 
-$ kubectl top pod burstable-workload
-NAME                CPU(cores)   MEMORY(bytes)
-burstable-workload  100m         2.5Gi          # Using 2.5Gi (1Gi request + 1.5Gi from swap)
+# Now new pod is created with clean resource handover
+$ kubectl get pods -w
+NAME                        READY   STATUS    RESTARTS   AGE
+ml-training-job-v134-xyz    0/1     Failed    0          3m
+ml-training-job-v134-def    0/1     Pending   0          1s    # Created after clean termination
+ml-training-job-v134-def    1/1     Running   0          15s   # Starts immediately - no conflicts
 
-$ kubectl describe pod burstable-workload
-QoS Class:       Burstable
-Resources:
-  Limits:        memory: 2Gi
-  Requests:      memory: 1Gi
-
-# Check node swap usage
-$ kubectl get --raw /api/v1/nodes/node-1 | jq '.status.nodeInfo.swapUsage'
-{
-  "swapAvailableBytes": 536870912,    # 512Mi available
-  "swapTotalBytes": 2147483648        # 2Gi total
-}
-
-# Pod survives memory pressure instead of being OOMKilled
+$ kubectl describe pod ml-training-job-v134-def
 Events:
-  Normal  Started    2m    kubelet  Started container app
-  Normal  SwapUsage  1m    kubelet  Container using swap: 512Mi
+  Normal  Scheduled  15s  default-scheduler  Successfully assigned to node-1
+  Normal  Pulling    14s  kubelet           Pulling image "ml-training:latest"
+  Normal  Pulled     10s  kubelet           Successfully pulled image
+  Normal  Started    10s  kubelet           Started container trainer
+
+# No resource conflicts, no unnecessary autoscaling
+$ kubectl get nodes
+NAME     STATUS   ROLES    AGE   VERSION
+node-1   Ready    <none>   1d    v1.34.0   # No additional nodes needed
 ```
