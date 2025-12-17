@@ -1,57 +1,82 @@
 # Java-WAR
+
 ```bash
-$ kubectl apply -f multi-container-app-v133.yaml
-pod/multi-container-app created
+# Attempting to start kubelet with swap enabled
+$ sudo systemctl start kubelet
+$ sudo systemctl status kubelet
+● kubelet.service - kubelet: The Kubernetes Node Agent
+   Active: failed (Result: exit-code)
 
-$ kubectl top pod multi-container-app --containers
-POD                  NAME           CPU(cores)   MEMORY(bytes)
-multi-container-app  web-server     450m         400Mi        # Under-utilized
-multi-container-app  sidecar-proxy  50m          100Mi        # Idle, can't share
+$ sudo journalctl -u kubelet
+Jan 15 10:00:00 node-1 kubelet[1234]: F0115 10:00:00.123456    1234 server.go:294] 
+failed to run Kubelet: running with swap on is not supported, please disable swap! 
+or set --fail-swap-on flag to false.
 
-$ kubectl describe pod multi-container-app
-Containers:
-  web-server:
-    Limits:      cpu: 1, memory: 1Gi
-    Requests:    cpu: 500m, memory: 512Mi
-  sidecar-proxy:
-    Limits:      cpu: 500m, memory: 512Mi    # Wasted - proxy is idle
-    Requests:    cpu: 200m, memory: 256Mi
+# Must disable swap entirely
+$ sudo swapoff -a
+$ sudo systemctl start kubelet
+$ sudo systemctl status kubelet
+● kubelet.service - kubelet: The Kubernetes Node Agent
+   Active: active (running)
 
-# Resource waste: sidecar allocated but unused resources can't be shared
-$ kubectl get pod multi-container-app -o jsonpath='{.status.containerStatuses[*].name}'
-web-server sidecar-proxy
+# Pod with memory pressure gets OOMKilled
+$ kubectl apply -f memory-intensive-pod.yaml
+$ kubectl get pods
+NAME                   READY   STATUS      RESTARTS   AGE
+memory-intensive-pod   0/1     OOMKilled   1          30s
 
-# Web server needs more CPU but can't access sidecar's unused allocation
+$ kubectl describe pod memory-intensive-pod
+Last State:     Terminated
+  Reason:       OOMKilled    # No swap available for memory bursts
+  Exit Code:    137
 ```
 
 
-
 ```bash
-$ kubectl apply -f multi-container-app-v134.yaml
-pod/multi-container-app-v134 created
+# Kubelet starts successfully with swap enabled
+$ sudo swapon /swapfile
+$ sudo systemctl start kubelet
+$ sudo systemctl status kubelet
+● kubelet.service - kubelet: The Kubernetes Node Agent
+   Active: active (running)
 
-$ kubectl top pod multi-container-app-v134 --containers
-POD                      NAME           CPU(cores)   MEMORY(bytes)
-multi-container-app-v134 web-server     800m         600Mi        # Can use more!
-multi-container-app-v134 sidecar-proxy  50m          100Mi        # Minimal usage
+$ sudo journalctl -u kubelet | grep swap
+Jan 15 10:00:00 node-1 kubelet[5678]: I0115 10:00:00.123456    5678 kubelet.go:123] 
+"Swap is enabled with LimitedSwap behavior"
 
-$ kubectl describe pod multi-container-app-v134
-Pod Resources:           # Pod-level allocation
-  Limits:      cpu: 1500m, memory: 1.5Gi
-  Requests:    cpu: 700m, memory: 768Mi
+# Check swap configuration
+$ kubectl get --raw /api/v1/nodes/node-1 | jq '.status.allocatable'
+{
+  "cpu": "4",
+  "memory": "8Gi",
+  "swap.alpha.kubernetes.io/memory": "2Gi"    # Swap available!
+}
 
-Containers:
-  web-server:            # No individual limits - shares pod pool
-    Resources: <none>
-  sidecar-proxy:         # No individual limits - shares pod pool
-    Resources: <none>
+# Pod can use swap for memory bursts
+$ kubectl apply -f burstable-workload-v134.yaml
+$ kubectl get pods
+NAME                READY   STATUS    RESTARTS   AGE
+burstable-workload  1/1     Running   0          2m
 
-# Dynamic resource sharing in action
-$ kubectl exec multi-container-app-v134 -c web-server -- stress --cpu 1 --timeout 30s &
-$ kubectl top pod multi-container-app-v134 --containers
-POD                      NAME           CPU(cores)   MEMORY(bytes)
-multi-container-app-v134 web-server     1200m        800Mi        # Using sidecar's unused CPU!
-multi-container-app-v134 sidecar-proxy  50m          100Mi        # Still minimal
+$ kubectl top pod burstable-workload
+NAME                CPU(cores)   MEMORY(bytes)
+burstable-workload  100m         2.5Gi          # Using 2.5Gi (1Gi request + 1.5Gi from swap)
 
-# Total pod usage stays within limits, but containers can dynamically share
+$ kubectl describe pod burstable-workload
+QoS Class:       Burstable
+Resources:
+  Limits:        memory: 2Gi
+  Requests:      memory: 1Gi
+
+# Check node swap usage
+$ kubectl get --raw /api/v1/nodes/node-1 | jq '.status.nodeInfo.swapUsage'
+{
+  "swapAvailableBytes": 536870912,    # 512Mi available
+  "swapTotalBytes": 2147483648        # 2Gi total
+}
+
+# Pod survives memory pressure instead of being OOMKilled
+Events:
+  Normal  Started    2m    kubelet  Started container app
+  Normal  SwapUsage  1m    kubelet  Container using swap: 512Mi
 ```
