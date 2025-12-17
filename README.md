@@ -1,48 +1,57 @@
 ```bash
-# Kubelet starts successfully with swap enabled
-$ sudo swapon /swapfile
-$ sudo systemctl start kubelet
-$ sudo systemctl status kubelet
-● kubelet.service - kubelet: The Kubernetes Node Agent
-   Active: active (running)
+$ kubectl apply -f dynamic-storage-v134.yaml
+volumeattributesclass.storage.k8s.io/high-performance created
+persistentvolumeclaim/dynamic-storage-v134 created
 
-$ sudo journalctl -u kubelet | grep swap
-Jan 15 10:00:00 node-1 kubelet[5678]: I0115 10:00:00.123456    5678 kubelet.go:123] 
-"Swap is enabled with LimitedSwap behavior"
+$ kubectl get pvc
+NAME                   STATUS   VOLUME                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+dynamic-storage-v134   Bound    pvc-xyz789-abc123-def456   100Gi      RWO            gp3            30s
 
-# Check swap configuration
-$ kubectl get --raw /api/v1/nodes/node-1 | jq '.status.allocatable'
+$ kubectl get volumeattributesclass
+NAME               AGE
+high-performance   30s
+
+# Check initial volume attributes
+$ aws ec2 describe-volumes --volume-ids vol-xyz789abc123def456
 {
-  "cpu": "4",
-  "memory": "8Gi",
-  "swap.alpha.kubernetes.io/memory": "2Gi"    # Swap available!
+    "Volumes": [{
+        "VolumeId": "vol-xyz789abc123def456", 
+        "Iops": 10000,          # From VolumeAttributesClass
+        "Throughput": 500       # From VolumeAttributesClass
+    }]
 }
 
-# Pod can use swap for memory bursts
-$ kubectl apply -f burstable-workload-v134.yaml
-$ kubectl get pods
-NAME                READY   STATUS    RESTARTS   AGE
-burstable-workload  1/1     Running   0          2m
+# Need more performance? Update VolumeAttributesClass dynamically
+$ kubectl patch volumeattributesclass high-performance --type='merge' -p='{"parameters":{"iops":"20000","throughput":"1000"}}'
+volumeattributesclass.storage.k8s.io/high-performance patched
 
-$ kubectl top pod burstable-workload
-NAME                CPU(cores)   MEMORY(bytes)
-burstable-workload  100m         2.5Gi          # Using 2.5Gi (1Gi request + 1.5Gi from swap)
+# Apply new attributes to existing PVC (NO RECREATION NEEDED)
+$ kubectl patch pvc dynamic-storage-v134 --type='merge' -p='{"spec":{"volumeAttributesClassName":"high-performance"}}'
+persistentvolumeclaim/dynamic-storage-v134 patched
 
-$ kubectl describe pod burstable-workload
-QoS Class:       Burstable
-Resources:
-  Limits:        memory: 2Gi
-  Requests:      memory: 1Gi
-
-# Check node swap usage
-$ kubectl get --raw /api/v1/nodes/node-1 | jq '.status.nodeInfo.swapUsage'
-{
-  "swapAvailableBytes": 536870912,    # 512Mi available
-  "swapTotalBytes": 2147483648        # 2Gi total
-}
-
-# Pod survives memory pressure instead of being OOMKilled
+# Check volume modification in progress
+$ kubectl describe pvc dynamic-storage-v134
 Events:
-  Normal  Started    2m    kubelet  Started container app
-  Normal  SwapUsage  1m    kubelet  Container using swap: 512Mi
+  Normal  VolumeAttributesModification  30s  volume-modifier  Modifying volume attributes
+  Normal  VolumeAttributesModified      15s  volume-modifier  Volume attributes successfully modified
+
+# Verify new IOPS without downtime
+$ aws ec2 describe-volumes --volume-ids vol-xyz789abc123def456
+{
+    "Volumes": [{
+        "VolumeId": "vol-xyz789abc123def456",
+        "Iops": 20000,          # Updated dynamically!
+        "Throughput": 1000,     # Updated dynamically!
+        "ModifyingProgress": 100 # Modification complete
+    }]
+}
+
+# Pod continues running with improved performance
+$ kubectl get pods
+NAME      READY   STATUS    RESTARTS   AGE
+app-pod   1/1     Running   0          5m    # No restart needed!
+
+# Performance improvement visible immediately
+$ kubectl exec app-pod -- fio --name=test --rw=randwrite --bs=4k --numjobs=1 --time_based --runtime=30s
+write: IOPS=18.5k    # Higher IOPS achieved without downtime
 ```
