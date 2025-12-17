@@ -1,72 +1,58 @@
 ```bash
-$ kubectl apply -f ml-training-job-v133.yaml
-job.batch/ml-training-job created
+$ kubectl apply -f config-v133.yaml
+configmap/config created
 
-# Simulate pod failure
-$ kubectl delete pod ml-training-job-xyz --force
-pod "ml-training-job-xyz" force deleted
+$ kubectl get configmap config -o yaml
+apiVersion: v1
+data:
+  country: "false"        # NO became boolean false!
+  enabled: "true"         # yes became boolean true!
+  port: "8080"           # 8080something truncated
+  version: "1.23"        # 01.23 became 1.23 (lost leading zero)
+kind: ConfigMap
 
-$ kubectl get pods -w
-NAME                    READY   STATUS        RESTARTS   AGE
-ml-training-job-xyz     1/1     Terminating   0          2m
-ml-training-job-abc     0/1     Pending       0          5s    # New pod created immediately!
+# Application reads wrong values
+$ kubectl exec test-pod -- env | grep CONFIG
+CONFIG_COUNTRY=false     # Should be "NO" (Norway)
+CONFIG_ENABLED=true      # Should be "yes" 
+CONFIG_VERSION=1.23      # Should be "01.23"
 
-# Both pods exist simultaneously - resource conflict
-$ kubectl describe pod ml-training-job-abc
-Events:
-  Warning  FailedScheduling  30s  default-scheduler  0/3 nodes are available: 
-  1 Insufficient nvidia.com/gpu (old pod still holds GPU while terminating)
-
-# Resource waste and autoscaler confusion
-$ kubectl get nodes
-NAME     STATUS   ROLES    AGE   VERSION
-node-1   Ready    <none>   1d    v1.33.0
-node-2   Ready    <none>   1d    v1.33.0   # Autoscaler may add unnecessary nodes
-
-# Old pod finally terminates, new pod can start
-$ kubectl get pods
-NAME                    READY   STATUS    RESTARTS   AGE
-ml-training-job-abc     1/1     Running   0          2m
+# Debugging nightmare - values silently changed
+$ echo "Application fails because country=false instead of 'NO'"
+$ echo "Version comparison breaks: '1.23' != '01.23'"
 ```
 
 ```bash
-$ kubectl apply -f ml-training-job-v134.yaml
-job.batch/ml-training-job-v134 created
+$ KUBECTL_KYAML=true kubectl apply -f config-v134.yaml
+configmap/config created
 
-# Simulate pod failure
-$ kubectl delete pod ml-training-job-v134-xyz --force
-pod "ml-training-job-v134-xyz" force deleted
+$ kubectl get configmap config -o yaml
+apiVersion: v1
+data:
+  country: "NO"          # Preserved as string
+  enabled: "yes"         # Preserved as string  
+  port: "8080"          # Preserved as string
+  version: "01.23"      # Leading zero preserved
+kind: ConfigMap
 
-$ kubectl get pods -w
-NAME                        READY   STATUS        RESTARTS   AGE
-ml-training-job-v134-xyz    1/1     Terminating   0          2m
-# No new pod created yet - waiting for clean termination
+# Application reads correct values
+$ kubectl exec test-pod -- env | grep CONFIG
+CONFIG_COUNTRY=NO        # Correct country code
+CONFIG_ENABLED=yes       # Correct string value
+CONFIG_VERSION=01.23     # Leading zero preserved
 
-$ kubectl describe job ml-training-job-v134
-Spec:
-  Pod Replacement Policy: Failed    # Wait for Failed status
+# KYAML validation catches problems early
+$ cat problematic.yaml
+apiVersion: v1
+kind: ConfigMap
+data:
+  country: NO            # Unquoted - KYAML will warn
+  
+$ KUBECTL_KYAML=true kubectl apply -f problematic.yaml --dry-run=client
+Warning: KYAML: Boolean-like strings should be quoted
+Warning: KYAML: Value 'NO' may be interpreted as boolean, consider quoting
 
-# Pod reaches Failed status, resources fully released
-$ kubectl get pods
-NAME                        READY   STATUS   RESTARTS   AGE
-ml-training-job-v134-xyz    0/1     Failed   0          3m
-
-# Now new pod is created with clean resource handover
-$ kubectl get pods -w
-NAME                        READY   STATUS    RESTARTS   AGE
-ml-training-job-v134-xyz    0/1     Failed    0          3m
-ml-training-job-v134-def    0/1     Pending   0          1s    # Created after clean termination
-ml-training-job-v134-def    1/1     Running   0          15s   # Starts immediately - no conflicts
-
-$ kubectl describe pod ml-training-job-v134-def
-Events:
-  Normal  Scheduled  15s  default-scheduler  Successfully assigned to node-1
-  Normal  Pulling    14s  kubelet           Pulling image "ml-training:latest"
-  Normal  Pulled     10s  kubelet           Successfully pulled image
-  Normal  Started    10s  kubelet           Started container trainer
-
-# No resource conflicts, no unnecessary autoscaling
-$ kubectl get nodes
-NAME     STATUS   ROLES    AGE   VERSION
-node-1   Ready    <none>   1d    v1.34.0   # No additional nodes needed
+# Safe application behavior
+$ echo "Application works correctly with preserved string values"
+$ echo "No silent type coercion surprises"
 ```
