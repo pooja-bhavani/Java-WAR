@@ -1,27 +1,28 @@
 # Java-WAR
 ```bash
-$ kubectl apply -f private-image-pod-v133.yaml
-secret/registry-secret created
-pod/private-image-pod created
+$ kubectl apply -f private-image-pod-v134.yaml
+serviceaccount/image-puller created
+pod/private-image-pod-v134 created
 
-$ kubectl get secrets
-NAME              TYPE                             DATA   AGE
-registry-secret   kubernetes.io/dockerconfigjson   1      30s
+$ kubectl get serviceaccounts
+NAME           SECRETS   AGE
+image-puller   0         30s    # No static secrets!
 
-$ kubectl describe secret registry-secret
-Type:  kubernetes.io/dockerconfigjson
-Data
-====
-.dockerconfigjson:  156 bytes   # Static, never expires
+$ kubectl describe pod private-image-pod-v134
+Service Account:  image-puller
+Volumes:
+  kube-api-access-xyz:
+    Type:                    Projected (a volume that contains injected data)
+    TokenExpirationSeconds:  3607    # Token expires in ~1 hour
+    ConfigMapName:           kube-root-ca.crt
+    DownwardAPI:             true
 
-$ kubectl get pods
-NAME                READY   STATUS    RESTARTS   AGE
-private-image-pod   1/1     Running   0          45s
+# Check token rotation
+$ kubectl exec private-image-pod-v134 -- cat /var/run/secrets/kubernetes.io/serviceaccount/token | cut -d. -f2 | base64 -d | jq .exp
+1705320000   # Expiration timestamp - auto-rotated
 
-# Security issue: Secret persists indefinitely
-$ kubectl get secret registry-secret -o yaml | grep creationTimestamp
-  creationTimestamp: "2024-01-15T10:00:00Z"   # Created weeks ago, still valid
-
-# If compromised, provides long-term access
-$ echo "Secret leaked - attacker has permanent registry access until manually rotated"
+$ kubectl get events --field-selector involvedObject.name=private-image-pod-v134
+LAST SEEN   TYPE     REASON      OBJECT                    MESSAGE
+2m          Normal   Pulling     pod/private-image-pod-v134   Pulling image using ServiceAccount token
+2m          Normal   Pulled      pod/private-image-pod-v134   Successfully pulled image with rotated token
 ```
