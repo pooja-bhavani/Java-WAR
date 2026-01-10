@@ -1,53 +1,68 @@
 ```yaml
-# v1.34: Basic Service - no locality control
-apiVersion: v1
-kind: Service
+# v1.35: Gang scheduling - all Pods scheduled together or none
+apiVersion: workload.x-k8s.io/v1alpha1
+kind: Workload
 metadata:
-  name: cache-service
+  name: ml-training-job
 spec:
-  selector:
-    app: redis-cache
-  ports:
-  - port: 6379
-    targetPort: 6379
-  # No traffic distribution control available
+  podSets:
+  - name: workers
+    count: 4
+    template:
+      spec:
+        containers:
+        - name: worker
+          image: tensorflow/tensorflow:latest-gpu
+          resources:
+            requests:
+              nvidia.com/gpu: 1
+              cpu: "2"
+              memory: "4Gi"
+  - name: parameter-server
+    count: 1
+    template:
+      spec:
+        containers:
+        - name: ps
+          image: tensorflow/tensorflow:latest
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: workload.x-k8s.io/v1alpha1
+kind: PodGroup
 metadata:
-  name: redis-cache
+  name: ml-training-group
 spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: redis-cache
-  template:
-    metadata:
-      labels:
-        app: redis-cache
-    spec:
-      containers:
-      - name: redis
-        image: redis:7-alpine
+  policy: gang  # All-or-nothing scheduling
+  minMember: 5  # 4 workers + 1 parameter server
 ```
 
 ```bash
-# v1.34: Traffic routing was unpredictable
-$ kubectl get pods -o wide
-NAME                          READY   STATUS    RESTARTS   AGE   IP           NODE
-redis-cache-abc123           1/1     Running   0          5m    10.244.1.10   node-1
-redis-cache-def456           1/1     Running   0          5m    10.244.2.15   node-2
-redis-cache-ghi789           1/1     Running   0          5m    10.244.3.20   node-3
+# v1.35: scheduling
+$ kubectl apply -f ml-training-gang.yaml
 
-# Application pod on node-1
-$ kubectl get pod app-pod -o wide
-NAME      READY   STATUS    RESTARTS   AGE   IP           NODE
-app-pod   1/1     Running   0          2m    10.244.1.25   node-1
+# Gang scheduler waits for ALL resources to be available
+$ kubectl get pods
 
-# Traffic could go to ANY cache pod, even remote ones
+NAME                     READY   STATUS    RESTARTS   AGE
+# No pods created yet - waiting for full resource availability
+
+# Once resources are available, ALL pods start together:
+$ kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+ml-training-worker-0     1/1     Running   0          30s
+ml-training-worker-1     1/1     Running   0          30s
+ml-training-worker-2     1/1     Running   0          30s
+ml-training-worker-3     1/1     Running   0          30s
+ml-training-ps-0         1/1     Running   0          30s
+
 # Result:
-# High latency (cross-node traffic)
-# Poor cache locality
-# Increased network overhead
-# Unpredictable performance
+# All pods start simultaneously
+# No wasted resources
+# Training begins immediately
+# Predictable job completion
 ```
+
+---
