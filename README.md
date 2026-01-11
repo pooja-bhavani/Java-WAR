@@ -1,19 +1,21 @@
+
 ```bash
-# v1.34: The problematic scenario
-$ kubectl apply -f ml-training.yaml
+# v1.34: Traffic routing was unpredictable
+$ kubectl get pods -o wide
+NAME                          READY   STATUS    RESTARTS   AGE   IP           NODE
+redis-cache-abc123           1/1     Running   0          5m    10.244.1.10   node-1
+redis-cache-def456           1/1     Running   0          5m    10.244.2.15   node-2
+redis-cache-ghi789           1/1     Running   0          5m    10.244.3.20   node-3
 
-# What often happened - partial scheduling:
-$ kubectl get pods
-NAME                                 READY   STATUS    RESTARTS   AGE
-ml-training-workers-7d4b8c5f-abc12   1/1     Running   0          2m
-ml-training-workers-7d4b8c5f-def34   1/1     Running   0          2m
-ml-training-workers-7d4b8c5f-ghi56   0/1     Pending   0          2m  # Stuck!
-ml-training-workers-7d4b8c5f-jkl78   0/1     Pending   0          2m  # Stuck!
-parameter-server                     0/1     Pending   0          2m  # Stuck!
+# Application pod on node-1
+$ kubectl get pod app-pod -o wide
+NAME      READY   STATUS    RESTARTS   AGE   IP           NODE
+app-pod   1/1     Running   0          2m    10.244.1.25   node-1
 
+# Traffic could go to ANY cache pod, even remote ones
 # Result:
-# 2 workers running but can't start training (need all 4)
-# Wasted GPU resources (2 GPUs doing nothing)
-# Job never completes
-# Manual intervention required
+# High latency (cross-node traffic)
+# Poor cache locality
+# Increased network overhead
+# Unpredictable performance
 ```
