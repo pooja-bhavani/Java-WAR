@@ -1,68 +1,48 @@
 ```yaml
-# v1.35: Gang scheduling - all Pods scheduled together or none
-apiVersion: workload.x-k8s.io/v1alpha1
-kind: Workload
+# v1.35: Same Pod, but now supports in-place resize
+apiVersion: v1
+kind: Pod
 metadata:
-  name: ml-training-job
+  name: database-pod
 spec:
-  podSets:
-  - name: workers
-    count: 4
-    template:
-      spec:
-        containers:
-        - name: worker
-          image: tensorflow/tensorflow:latest-gpu
-          resources:
-            requests:
-              nvidia.com/gpu: 1
-              cpu: "2"
-              memory: "4Gi"
-  - name: parameter-server
-    count: 1
-    template:
-      spec:
-        containers:
-        - name: ps
-          image: tensorflow/tensorflow:latest
-          resources:
-            requests:
-              cpu: "1"
-              memory: "2Gi"
----
-apiVersion: workload.x-k8s.io/v1alpha1
-kind: PodGroup
-metadata:
-  name: ml-training-group
-spec:
-  policy: gang  # All-or-nothing scheduling
-  minMember: 5  # 4 workers + 1 parameter server
+  containers:
+  - name: postgres
+    image: postgres:13
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "1000m"
+        memory: "2Gi"
 ```
 
 ```bash
-# v1.35: scheduling
-$ kubectl apply -f ml-training-gang.yaml
-
-# Gang scheduler waits for ALL resources to be available
-$ kubectl get pods
-
-NAME                     READY   STATUS    RESTARTS   AGE
-# No pods created yet - waiting for full resource availability
-
-# Once resources are available, ALL pods start together:
-$ kubectl get pods
-NAME                     READY   STATUS    RESTARTS   AGE
-ml-training-worker-0     1/1     Running   0          30s
-ml-training-worker-1     1/1     Running   0          30s
-ml-training-worker-2     1/1     Running   0          30s
-ml-training-worker-3     1/1     Running   0          30s
-ml-training-ps-0         1/1     Running   0          30s
+# v1.35: NO DOWNTIME!
+kubectl patch pod database-pod --type='merge' -p='
+{
+  "spec": {
+    "containers": [
+      {
+        "name": "postgres",
+        "resources": {
+          "requests": {
+            "cpu": "1000m",
+            "memory": "2Gi"
+          },
+          "limits": {
+            "cpu": "2000m",
+            "memory": "4Gi"
+          }
+        }
+      }
+    ]
+  }
+}'
 
 # Result:
-# All pods start simultaneously
-# No wasted resources
-# Training begins immediately
-# Predictable job completion
+# Zero downtime
+# Connections preserved
+# State maintained
+# Instant resource adjustment
 ```
-
----
