@@ -1,6 +1,5 @@
-
 ```bash
-# v1.34: Traffic routing was unpredictable
+# v1.35: Predictable traffic routing
 $ kubectl get pods -o wide
 NAME                          READY   STATUS    RESTARTS   AGE   IP           NODE
 redis-cache-abc123           1/1     Running   0          5m    10.244.1.10   node-1
@@ -12,10 +11,10 @@ $ kubectl get pod app-pod -o wide
 NAME      READY   STATUS    RESTARTS   AGE   IP           NODE
 app-pod   1/1     Running   0          2m    10.244.1.25   node-1
 
-# Traffic could go to ANY cache pod, even remote ones
+# Traffic preferentially goes to local cache pod (redis-cache-abc123)
 # Result:
-# High latency (cross-node traffic)
-# Poor cache locality
-# Increased network overhead
-# Unpredictable performance
+# Low latency (same-node traffic)
+# Better cache locality
+# Reduced network overhead
+# Predictable performance
 ```
