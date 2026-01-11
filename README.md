@@ -1,20 +1,23 @@
 ```bash
-# v1.35: Predictable traffic routing
-$ kubectl get pods -o wide
-NAME                          READY   STATUS    RESTARTS   AGE   IP           NODE
-redis-cache-abc123           1/1     Running   0          5m    10.244.1.10   node-1
-redis-cache-def456           1/1     Running   0          5m    10.244.2.15   node-2
-redis-cache-ghi789           1/1     Running   0          5m    10.244.3.20   node-3
+# v1.34: Complex setup required
+# 1. Install cert-manager
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
 
-# Application pod on node-1
-$ kubectl get pod app-pod -o wide
-NAME      READY   STATUS    RESTARTS   AGE   IP           NODE
-app-pod   1/1     Running   0          2m    10.244.1.25   node-1
+# 2. Create CA issuer
+kubectl apply -f ca-issuer.yaml
 
-# Traffic preferentially goes to local cache pod (redis-cache-abc123)
+# 3. Create certificate resource
+kubectl apply -f certificate.yaml
+
+# 4. Wait for certificate to be issued
+kubectl wait --for=condition=Ready certificate/workload-cert
+
+# 5. Finally deploy the Pod
+kubectl apply -f secure-workload.yaml
+
 # Result:
-# Low latency (same-node traffic)
-# Better cache locality
-# Reduced network overhead
-# Predictable performance
+# Complex external dependencies
+# Multiple components to manage
+# Manual certificate rotation
+# Potential security gaps
 ```
